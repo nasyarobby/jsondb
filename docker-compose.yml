@@ -1,0 +1,8 @@
+version: "3.3"
+services:
+  api:
+    image: registry.paas.pajak.go.id:5000/projects/fastify-skeleton-v2
+    ports:
+      - 3000:3000
+    env_file:
+      - ./.env

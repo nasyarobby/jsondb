@@ -1,0 +1,8 @@
+build/
+.eslintrc.cjs
+tsconfig.json
+coverage
+jest.config.ts
+__mocks__/
+*.logging.cjs
+*.cjs
