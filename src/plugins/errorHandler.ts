@@ -36,9 +36,15 @@ const errorHandler:ErrorHandler = function errorHandler(
     }
 
     // Send error response
-    return reply
-      .setApi({ message: error.message, status: error.status, code: error.code })
-      .send({ ...error.data, error: error.originalError });
+    const apiError = error as ApiError;
+    reply.status(error instanceof ClientError ? 400 : 500);
+    reply.send({
+      status: 'error',
+      message: apiError.message,
+      code: apiError.code,
+      ...error.data,
+      error: error.originalError,
+    });
   }
 
   const fastifyError = error as FastifyError;
@@ -55,28 +61,7 @@ const errorHandler:ErrorHandler = function errorHandler(
     },
   }, 'unhandled errors or database-related errors encountered');
 
-  if (error.message?.startsWith('ORA-')) {
-    return reply
-      .setApi({
-        status: 'error',
-        code: 'ERR_DB',
-        message: `Terdapat kesalahan pada sistem (${error.message.split(':')[0].toUpperCase()}).`,
-      })
-      .send({
-        error: {
-          message: error.message,
-          stack: error.stack,
-          code: fastifyError.code === undefined ? '500' : fastifyError.code,
-        },
-      });
-  }
-
   return reply
-    .setApi({
-      status: 'error',
-      code: 'INTERNAL_SERVER_ERROR',
-      message: 'Unknown error has occured.',
-    })
     .send({
       error: {
         message: error.message,

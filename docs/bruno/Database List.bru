@@ -1,0 +1,15 @@
+meta {
+  name: Database List
+  type: http
+  seq: 4
+}
+
+get {
+  url: http://localhost:3000/databases
+  body: json
+  auth: none
+}
+
+body:json {
+  {"jsonata": "wp{id: nama.$uppercase}"}
+}

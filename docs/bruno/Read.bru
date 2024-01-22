@@ -1,0 +1,15 @@
+meta {
+  name: Read
+  type: http
+  seq: 1
+}
+
+post {
+  url: http://localhost:3000/read/mydb/wp
+  body: json
+  auth: none
+}
+
+body:json {
+  {{"jsonata": "$[id='143468445721000']"}}
+}

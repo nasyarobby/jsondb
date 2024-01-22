@@ -1,18 +1,11 @@
-import fastify from 'fastify';
+import fastify, { FastifyRequest } from 'fastify';
 import fastifyEnv from '@fastify/env';
-import fastifyOpenapiGlue from 'fastify-openapi-glue';
-import * as url from 'url';
-import { knexSnakeCaseMappers } from 'objection';
-import registerFastifySwagger from './plugins/registerFastifySwagger.js';
-import replyWrapperPlugin from './plugins/ReplyWrapper.js';
+import { Config, JsonDB } from 'node-json-db';
+import jsonata from 'jsonata';
 import configSchema from './config.js';
-import ioredisPlugin from './plugins/ioredis.js';
 import errorHandler from './plugins/errorHandler.js';
 import notFoundHandler from './plugins/notFoundHandler.js';
-import getService from './services/index.js';
-import objectionjs from './plugins/objectionjs.js';
-import Models from './models/index.js';
-import RedisCache from './plugins/RedisCache.js';
+import ClientError from './plugins/ClientError.js';
 
 async function start() {
   const app = fastify({ logger: true });
@@ -25,17 +18,6 @@ async function start() {
   app.setNotFoundHandler(notFoundHandler);
 
   /**
- * Plugin: ReplyWrapper
- */
-  await app.register(replyWrapperPlugin);
-
-  /**
- * Plugin: Swagger UI
- * Halaman dapat diakses pada /documentation
- */
-  await registerFastifySwagger(app);
-
-  /**
  * Plugin: @fastify/env
  * cek file {@link ./config.ts}
  */
@@ -46,49 +28,106 @@ async function start() {
   // eslint-disable-next-line no-console
   console.table(app.config);
 
-  await app.register(objectionjs, {
-    knexConfig: {
-      client: 'oracledb',
-      connection: {
-        connectString: app.config.DB_CONNECT_STRING,
-        user: app.config.DB_USER,
-        password: app.config.DB_PASSWORD,
-      },
-      ...knexSnakeCaseMappers({
-        upperCase: true,
-      }),
-      debug: app.config.DEBUG_DB,
+  const databases = new Set<{ name: string, instance: JsonDB }>();
+
+  function getDbByName(dbname: string) {
+    return Array.from(databases).find((db) => db.name === dbname);
+  }
+
+  const dbconfig = new JsonDB(new Config('config.json', true, false, '/'));
+
+  await dbconfig.getData('/databases').then((dbs) => {
+    (dbs as string[]).forEach((db) => {
+      app.log.info('Loading database: %s', db);
+      databases.add({ name: db, instance: new JsonDB(new Config(`db/${db}`, true, false)) });
+    });
+  });
+
+  app.route({
+    method: 'POST',
+    url: '/init/:dbname',
+    handler: async (req:FastifyRequest<{
+      Params: { dbname: string }
+    }>, res) => {
+      req.log.info({ path: req.url }, 'Path');
+      const reqDbName = req.params.dbname;
+      const existing = getDbByName(reqDbName);
+
+      if (!existing) {
+        const db = new JsonDB(new Config(`db/${reqDbName}`, true, false, '/'));
+        databases.add({ name: reqDbName, instance: db });
+
+        dbconfig.push('/databases[]', reqDbName);
+        db.push('/', req.body);
+      }
+
+      return res.send({ db: reqDbName, created: !existing });
     },
-    models: Models,
   });
 
-  /**
- * Plugin: IORedis {@file ./plugins/ioredis.ts}
- * akses via req.redis
- * NOTES: Remember to always await (or then/catch) redis command
- * or else Fastify will crash
- */
-  await app.register(ioredisPlugin);
-
-  /**
-   * Plugin RedisCache
-   * see examples
-   */
-  await app.register(RedisCache, {
-    redis: app.redis,
-    db: 5,
-    ttl: 60 * 60,
+  app.route({
+    method: 'GET',
+    url: '/databases',
+    handler: async (req, res) => Array.from(databases),
   });
 
-  /**
- * Plugin: fastify-openapi-glue
- * Spek API disimpan pada file openapi.json
- */
-  const dirname = url.fileURLToPath(new URL('.', import.meta.url));
-  await app.register(fastifyOpenapiGlue, {
-    specification: `${dirname}/openapi.json`,
-    service: getService(app),
-    prefix: '/api',
+  app.route({
+    method: 'POST',
+    url: '/read/:dbname/*',
+    handler: async (req:FastifyRequest<{
+      Params: { dbname: string },
+      Body: { jsonata?: string, id?: string }
+    }>, res) => {
+      req.log.info({ path: req.url }, 'Path');
+      const { dbname: reqDbName } = req.params;
+      const dataPath = req.url.substring(`/read/${reqDbName}`.length);
+
+      const dbInstance = getDbByName(reqDbName);
+      if (!dbInstance) {
+        throw new ClientError({ code: 'DB_NOT_FOUND', message: `Database ${reqDbName} not found` });
+      }
+
+      const db = dbInstance.instance;
+      const { jsonata: JSONataExpression } = req.body;
+
+      const index = req.body.id ? await db.getIndex(dataPath, req.body.id) : -1;
+
+      if (req.body.id) {
+
+      }
+      const data = index >= 0 ? await db.getData(`${dataPath}[${index}]`) : await db.getData(dataPath);
+
+      let dataTransformed = data;
+
+      if (JSONataExpression) {
+        const expression = jsonata(JSONataExpression);
+        dataTransformed = await expression.evaluate(data);
+      }
+
+      res.header('X-PATH', dataPath);
+      res.header('X-DBNAME', reqDbName);
+      return res.send(dataTransformed);
+    },
+  });
+
+  app.route({
+    method: 'POST',
+    url: '/write/:dbname/*',
+    handler: async (req:FastifyRequest<{
+      Params: { dbname: string }
+    }>, res) => {
+      req.log.info({ path: req.url }, 'Path');
+      const { dbname } = req.params;
+      const dataPath = req.url.substring(`/write/${dbname}`.length);
+      const dbInstance = Array.from(databases).find((item) => item.name === dbname);
+      req.log.debug({ databases, dbInstance, dbname }, 'DB instance');
+      if (dbInstance) {
+        const db = dbInstance.instance;
+        const data = await db.push(dataPath, req.body);
+        res.send({ db: dbname, path: dataPath, data });
+      }
+      res.callNotFound();
+    },
   });
 
   app.ready((errorOnAppReady) => {
