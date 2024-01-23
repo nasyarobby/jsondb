@@ -2,6 +2,7 @@ import fastify, { FastifyRequest } from 'fastify';
 import fastifyEnv from '@fastify/env';
 import { Config, JsonDB } from 'node-json-db';
 import jsonata from 'jsonata';
+import fastifyCors from '@fastify/cors';
 import configSchema from './config.js';
 import errorHandler from './plugins/errorHandler.js';
 import notFoundHandler from './plugins/notFoundHandler.js';
@@ -28,6 +29,10 @@ async function start() {
   // eslint-disable-next-line no-console
   console.table(app.config);
 
+  await app.register(fastifyCors, {
+    // put your options here
+  });
+
   const databases = new Set<{ name: string, instance: JsonDB }>();
 
   function getDbByName(dbname: string) {
@@ -37,7 +42,7 @@ async function start() {
   const dbconfig = new JsonDB(new Config('config.json', true, false, '/'));
 
   await dbconfig.getData('/databases').then((dbs) => {
-    (dbs as string[]).forEach((db) => {
+    Object.keys(dbs as { [key: string] : { path: string } }).forEach((db) => {
       app.log.info('Loading database: %s', db);
       databases.add({ name: db, instance: new JsonDB(new Config(`db/${db}`, true, false)) });
     });
@@ -45,7 +50,7 @@ async function start() {
 
   app.route({
     method: 'POST',
-    url: '/init/:dbname',
+    url: '/:dbname/init',
     handler: async (req:FastifyRequest<{
       Params: { dbname: string }
     }>, res) => {
@@ -57,7 +62,7 @@ async function start() {
         const db = new JsonDB(new Config(`db/${reqDbName}`, true, false, '/'));
         databases.add({ name: reqDbName, instance: db });
 
-        dbconfig.push('/databases[]', reqDbName);
+        dbconfig.push(`/databases/${reqDbName}`, { path: `db/${reqDbName}` });
         db.push('/', req.body);
       }
 
@@ -67,13 +72,13 @@ async function start() {
 
   app.route({
     method: 'GET',
-    url: '/databases',
+    url: '/',
     handler: async (req, res) => Array.from(databases),
   });
 
   app.route({
     method: 'POST',
-    url: '/read/:dbname/*',
+    url: '/:dbname/read/*',
     handler: async (req:FastifyRequest<{
       Params: { dbname: string },
       Body: { jsonata?: string, id?: string }
@@ -92,9 +97,6 @@ async function start() {
 
       const index = req.body.id ? await db.getIndex(dataPath, req.body.id) : -1;
 
-      if (req.body.id) {
-
-      }
       const data = index >= 0 ? await db.getData(`${dataPath}[${index}]`) : await db.getData(dataPath);
 
       let dataTransformed = data;
@@ -106,27 +108,82 @@ async function start() {
 
       res.header('X-PATH', dataPath);
       res.header('X-DBNAME', reqDbName);
-      return res.send(dataTransformed);
+      return dataTransformed;
     },
   });
 
   app.route({
     method: 'POST',
-    url: '/write/:dbname/*',
+    url: '/:dbname/write/*',
     handler: async (req:FastifyRequest<{
       Params: { dbname: string }
     }>, res) => {
       req.log.info({ path: req.url }, 'Path');
       const { dbname } = req.params;
       const dataPath = req.url.substring(`/write/${dbname}`.length);
-      const dbInstance = Array.from(databases).find((item) => item.name === dbname);
+      const dbInstance = getDbByName(dbname);
+
       req.log.debug({ databases, dbInstance, dbname }, 'DB instance');
-      if (dbInstance) {
-        const db = dbInstance.instance;
-        const data = await db.push(dataPath, req.body);
-        res.send({ db: dbname, path: dataPath, data });
+
+      if (!dbInstance) {
+        throw new ClientError({ code: 'DB_NOT_FOUND', message: `Database ${dbname} not found` });
       }
-      res.callNotFound();
+
+      const db = dbInstance.instance;
+
+      await db.push(dataPath, req.body);
+
+      res.header('X-PATH', dataPath);
+      res.header('X-DBNAME', dbname);
+
+      return {};
+    },
+  });
+
+  app.route({
+    method: 'POST',
+    url: '/:dbname/delete/*',
+    handler: async (req:FastifyRequest<{
+      Params: { dbname: string }
+    }>, res) => {
+      req.log.info({ path: req.url }, 'Path');
+      const { dbname } = req.params;
+      const dataPath = req.url.substring(`/delete/${dbname}`.length);
+      const dbInstance = getDbByName(dbname);
+      req.log.debug({ databases, dbInstance, dbname }, 'DB instance');
+
+      if (!dbInstance) {
+        throw new ClientError({ code: 'DB_NOT_FOUND', message: `Database ${dbname} not found` });
+      }
+
+      const db = dbInstance.instance;
+      await db.delete(dataPath);
+      res.header('X-PATH', dataPath);
+      res.header('X-DBNAME', dbname);
+
+      return { [dataPath]: 'deleted' };
+    },
+  });
+
+  app.route({
+    method: 'POST',
+    url: '/:dbname/reload',
+    handler: async (req:FastifyRequest<{
+      Params: { dbname: string }
+    }>, res) => {
+      const reqDbName = req.params.dbname;
+      const db = new JsonDB(new Config(`db/${reqDbName}`, true, false, '/'));
+
+      const existing = getDbByName(reqDbName);
+      if (!existing) {
+        databases.add({ name: reqDbName, instance: db });
+        dbconfig.push('/databases[]', reqDbName);
+      } else {
+        await db.reload();
+      }
+      res.header('X-DBNAME', reqDbName);
+
+      return {};
     },
   });
 
